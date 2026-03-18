@@ -1,0 +1,211 @@
+# =============================================================================
+# Azure DevOps Pipeline - Repository Setup Terraform
+# =============================================================================
+# This pipeline runs Terraform to set up Azure DevOps repositories from templates
+# Uses OIDC (Workload Identity Federation) for authentication
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - '*.tf'
+      - '*.tfvars'
+
+pr:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: terraformVersion
+    displayName: 'Terraform Version'
+    type: string
+    default: 'latest'
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+  - name: templateRepositoryName
+    displayName: 'Template Repository Name'
+    type: string
+  - name: targetRepositoryName
+    displayName: 'Target Repository Name'
+    type: string
+
+pool:
+  name: 'ado-devops-pool'
+
+variables:
+  - group: repository-setup-automation
+  - name: TF_WORKING_DIR
+    value: '$(System.DefaultWorkingDirectory)'
+  - name: SERVICE_CONNECTION_NAME
+    value: 'sc-azure-devops-automation'
+
+stages:
+  # =============================================================================
+  # Terraform Plan Stage
+  # =============================================================================
+  - stage: Plan
+    displayName: 'Terraform Plan'
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Plan Infrastructure'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
+            inputs:
+              terraformVersion: '${{ parameters.terraformVersion }}'
+
+          - script: terraform fmt -check -recursive
+            displayName: 'Terraform Format Check'
+            workingDirectory: $(TF_WORKING_DIR)
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Init'
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION_NAME)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+              useWorkloadIdentityFederation: true
+              inlineScript: |
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_OIDC_TOKEN=$idToken
+                export ARM_TENANT_ID=$tenantId
+                export ARM_USE_OIDC=true
+                terraform init -input=false
+              workingDirectory: $(TF_WORKING_DIR)
+            env:
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              AZDO_ORG_SERVICE_URL: $(AZDO_ORG_SERVICE_URL)
+              AZDO_CLIENT_ID: $(AZDO_CLIENT_ID)
+              AZDO_TENANT_ID: $(AZDO_TENANT_ID)
+              AZDO_USE_OIDC: true
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)
+
+          - script: terraform validate
+            displayName: 'Terraform Validate'
+            workingDirectory: $(TF_WORKING_DIR)
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Plan'
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION_NAME)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+              useWorkloadIdentityFederation: true
+              inlineScript: |
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_OIDC_TOKEN=$idToken
+                export ARM_TENANT_ID=$tenantId
+                export ARM_USE_OIDC=true
+                terraform plan -input=false -out=tfplan
+              workingDirectory: $(TF_WORKING_DIR)
+            env:
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              AZDO_ORG_SERVICE_URL: $(AZDO_ORG_SERVICE_URL)
+              AZDO_CLIENT_ID: $(AZDO_CLIENT_ID)
+              AZDO_TENANT_ID: $(AZDO_TENANT_ID)
+              AZDO_USE_OIDC: true
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)
+              TF_VAR_project_name: ${{ parameters.projectName }}
+              TF_VAR_template_repository_name: ${{ parameters.templateRepositoryName }}
+              TF_VAR_target_repository_name: ${{ parameters.targetRepositoryName }}
+              TF_VAR_git_pat: $(GIT_PAT)
+
+          - publish: $(TF_WORKING_DIR)/tfplan
+            artifact: tfplan
+            displayName: 'Publish Plan Artifact'
+
+  # =============================================================================
+  # Terraform Apply Stage
+  # =============================================================================
+  - stage: Apply
+    displayName: 'Terraform Apply'
+    dependsOn: Plan
+    condition: succeeded() #and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: TerraformApply
+        displayName: 'Apply Infrastructure'
+        environment: 'alz-avm-plan'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
+                  inputs:
+                    terraformVersion: '${{ parameters.terraformVersion }}'
+
+                - download: current
+                  artifact: tfplan
+                  displayName: 'Download Plan Artifact'
+
+                - script: |
+                    cp $(Pipeline.Workspace)/tfplan/tfplan .
+                  displayName: 'Copy Plan File'
+                  workingDirectory: $(TF_WORKING_DIR)
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Init'
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION_NAME)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    addSpnToEnvironment: true
+                    useWorkloadIdentityFederation: true
+                    inlineScript: |
+                      export ARM_CLIENT_ID=$servicePrincipalId
+                      export ARM_OIDC_TOKEN=$idToken
+                      export ARM_TENANT_ID=$tenantId
+                      export ARM_USE_OIDC=true
+                      terraform init -input=false
+                    workingDirectory: $(TF_WORKING_DIR)
+                  env:
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    AZDO_ORG_SERVICE_URL: $(AZDO_ORG_SERVICE_URL)
+                    AZDO_CLIENT_ID: $(AZDO_CLIENT_ID)
+                    AZDO_TENANT_ID: $(AZDO_TENANT_ID)
+                    AZDO_USE_OIDC: true
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                    SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION_NAME)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    addSpnToEnvironment: true
+                    useWorkloadIdentityFederation: true
+                    inlineScript: |
+                      export ARM_CLIENT_ID=$servicePrincipalId
+                      export ARM_OIDC_TOKEN=$idToken
+                      export ARM_TENANT_ID=$tenantId
+                      export ARM_USE_OIDC=true
+                      terraform apply -input=false -auto-approve tfplan
+                    workingDirectory: $(TF_WORKING_DIR)
+                  env:
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    AZDO_ORG_SERVICE_URL: $(AZDO_ORG_SERVICE_URL)
+                    AZDO_CLIENT_ID: $(AZDO_CLIENT_ID)
+                    AZDO_TENANT_ID: $(AZDO_TENANT_ID)
+                    AZDO_USE_OIDC: true
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                    SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)
+                    TF_VAR_project_name: ${{ parameters.projectName }}
+                    TF_VAR_template_repository_name: ${{ parameters.templateRepositoryName }}
+                    TF_VAR_target_repository_name: ${{ parameters.targetRepositoryName }}
+                    TF_VAR_git_pat: $(GIT_PAT)

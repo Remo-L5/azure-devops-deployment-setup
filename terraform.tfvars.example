@@ -1,0 +1,14 @@
+# =============================================================================
+# Example Terraform Variables File
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values
+# =============================================================================
+
+# The name of your Azure DevOps project
+project_name = "MyProject"
+
+# The name of the template repository to clone from
+template_repository_name = "template-repo"
+
+# The name of the new repository to create
+target_repository_name = "my-new-repo"
